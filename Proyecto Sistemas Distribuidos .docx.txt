@@ -1,0 +1,273 @@
+914400552714 Pontificia Universidad JaverianaIngeniería de SistemasIntroducción a los Sistemas DistribuidosProyecto - Entrega IJuan Sebastián Álvarez, Valeria Herrera, Xiomara Herrera, David Orjuela, Carol Fernanda Ríos
+Gestión Inteligente de Tráfico Urbano
+Tabla de contenidos:
+ TOC \h \u \z \t &quot;Heading 1,1,Heading 2,2,Heading 3,3,Heading 4,4,Heading 5,5,Heading 6,6,&quot;Introducción2
+Descripción del sistema2
+Cuadrícula de la ciudad y distribución de intersecciones2
+Parámetros de inicialización de cada proceso (intervalo, rango de valores, etc.)3
+Reglas de tráfico para los 3 estados (normal, congestión, priorización)4
+Modelos del sistema5
+Modelo arquitectónico5
+Modelo de interacción6
+Modelo de fallos6
+Modelo de seguridad7
+Modelo de McCuber8
+Diseño del sistema8
+Diagrama de despliegue9
+Diagrama de componentes9
+Diagrama de clases9
+Diagrama de secuencia9
+Componente de tolerancia a fallas10
+Protocolo de pruebas10
+Pruebas funcionales10
+Pruebas de integración10
+Pruebas de fallo10
+Pruebas de desempeño10
+Obtención de métricas de rendimiento10
+Implementación inicial — resultados10
+PC1: sensores y broker en ejecución, evidencia de mensajes publicados10
+PC2: servicio de analítica recibiendo eventos, semáforos respondiendo10
+Actualización a la BD principal del PC3 funcionando10
+Conclusiones11
+Referencias11
+Introducción 
+El presente documento corresponde a la primera entrega del proyecto de Gestión Inteligente de Tráfico Urbano, que consiste en el diseño e implementación de una plataforma distribuida que simula la gestión del tráfico en una ciudad representada como una cuadrícula de 4×5 intersecciones. El sistema integra una red de sensores de tráfico simulados (espiras inductivas, cámaras y GPS), un servicio de analítica que detecta condiciones de congestión y toma decisiones sobre la semaforización, y un módulo de monitoreo que permite a un operador consultar el estado del sistema e intervenir directamente. La comunicación entre los componentes se realiza mediante la librería ZeroMQ, empleando patrones síncronos y asíncronos según la naturaleza de cada interacción.
+El sistema se despliega sobre tres máquinas virtuales: PC1 aloja los sensores y el broker ZMQ, PC2 concentra el procesamiento (analítica, control de semáforos y base de datos réplica), y PC3 mantiene la base de datos principal y el servicio de monitoreo. El diseño contempla tolerancia a fallos ante la caída del PC3, redirigiendo automáticamente la persistencia hacia la réplica ubicada en PC2 sin interrumpir la operación del sistema.
+En esta primera entrega se presenta el diseño completo del sistema, incluyendo los modelos arquitectónico, de interacción, de fallos y de seguridad, los artefactos de diseño UML (despliegue, componentes, clases y secuencia), el protocolo de pruebas para la entrega final, la metodología de obtención de métricas de rendimiento, y la implementación inicial de los servicios correspondientes a PC1 y PC2.
+Descripción del sistema
+Cuadrícula de la ciudad y distribución de intersecciones
+El sistema simula una ciudad representada como una cuadrícula de 4×5 intersecciones, donde las filas se identifican con letras de la A a la D y las columnas con números del 1 al 5. Cada intersección se nombra con la notación INT_CK, donde C es la letra de la fila y K el número de la columna. La tabla 1 muestra la distribución completa de las 20 intersecciones.
+1
+2
+3
+4
+5
+A
+INT_A1
+INT_A2
+INT_A3
+INT_A4
+INT_A5
+B
+INT_B1
+INT_B2
+INT_B3
+INT_B4
+INT_B5
+C
+INT_C1
+INT_C2
+INT_C3
+INT_C4
+INT_C5
+D
+INT_D1
+INT_D2
+INT_D3
+INT_D4
+INT_D5
+Tabla 1. Cuadrícula de intersecciones de la ciudad simulada.
+En cada intersección se ubican tres sensores: una cámara de tráfico (CAM-CK), una espira inductiva (ESP-CK) y un sensor GPS (GPS-CK). Todas las vías son de sentido único, y los semáforos operan únicamente en dos estados: verde y rojo, sin transición por amarillo.
+Parámetros de inicialización de cada proceso (intervalo, rango de valores, etc.)
+Todos los procesos del sistema leen sus parámetros de operación del archivo config.json al momento de arranque, lo que permite modificar el comportamiento del sistema sin recompilar el código fuente. A continuación se describen los parámetros clave de cada tipo de proceso.
+Sensores (PC1):
+Parámetro
+Valor
+Descripción
+intervalo_segundos
+5 s
+Tiempo entre generación de eventos
+Volumen cámara (Q)
+0 – 30 veh
+Número de vehículos en espera
+Velocidad promedio (Vp)
+5 – 60 km/h
+Velocidad simulada en la intersección
+Vehículos espira (V)
+0 – 40 veh
+Vehículos contados en el intervalo
+Intervalo conteo espira
+30 s
+Ventana de tiempo del conteo
+Velocidad GPS (Vp)
+5 – 60 km/h
+Velocidad promedio de vehículos conectados
+Tabla 2. Parámetros de inicialización de los sensores.
+Los valores se generan mediante variables aleatorias uniformes dentro de los rangos indicados. Cada sensor se lanza como proceso independiente recibiendo como argumentos su identificador y la intersección que cubre. 
+Semáforos (PC2):
+Parámetro
+Valor
+Descripción
+Tiempo verde normal
+15 s
+Duración del verde en condición normal
+Tiempo verde congestión
+30 s
+Verde extendido ante congestión detectada
+Tiempo verde priorización
+60 s
+Verde forzado ante indicación manual o ambulancia
+Tabla 3. Tiempos de ciclo de semáforos según condición.
+Bases de datos: la BD principal reside en PC3 (trafico_principal.db) y la réplica en PC2 (trafico_replica.db). Ambas se inicializan con el mismo esquema de tablas mediante el script init_db.py. El health check entre analítica y PC3 se ejecuta cada 3 segundos, con un timeout de 6 segundos antes de declarar falla.
+Reglas de tráfico para los 3 estados (normal, congestión, priorización)
+El servicio de analítica evalúa continuamente los datos recibidos de los tres tipos de sensores para clasificar la condición de cada intersección en uno de tres estados. Las variables utilizadas son:
+Q: longitud de cola (número de vehículos en espera), medida por la cámara
+Vp: velocidad promedio en km/h, medida por cámara o GPS
+V: volumen vehicular en vehículos por intervalo, medido por la espira inductiva
+Las reglas definidas para el sistema son las siguientes:
+Estado 1 — Tráfico normal:
+Se cumple cuando la intersección opera dentro de parámetros fluidos. La regla es:
+Q < 5  AND  Vp > 35  AND  V < 20
+Acción: ciclo estándar de semáforo con 15 segundos de verde.
+Estado 2 — Congestión:
+Se detecta cuando al menos una de las condiciones de fluidez se rompe:
+Q >= 5  OR  Vp <= 35  OR  V >= 20
+Acción: el servicio de analítica extiende la fase verde en la vía congestionada a 30 segundos para facilitar el vaciado de la cola. Se imprime por pantalla el detalle de los valores que activaron la regla y la acción tomada.
+Estado 3 — Priorización de vía (ola verde):
+Se activa únicamente por indicación directa del operador desde el servicio de monitoreo en PC3. Por ejemplo, el paso de ambulancia por la fila B.
+Acción: todos los semáforos de la vía indicada cambian a verde durante 60 segundos de forma simultánea. Los semáforos transversales permanecen en rojo durante ese período. Al finalizar el tiempo, cada semáforo retorna automáticamente a su estado anterior.
+El nivel de congestión del sensor GPS se calcula de forma independiente según la velocidad promedio reportada:
+Nivel
+Condición
+ALTA
+Vp < 10 km/h
+NORMAL
+10 ≤ Vp ≤ 39 km/h
+BAJA
+Vp > 39 km/h
+Tabla 4. Niveles de congestión GPS.
+Este valor se almacena en la BD y puede consultarse históricamente, pero la decisión de semáforo se toma siempre sobre las reglas cruzadas de los tres sensores.
+Modelos del sistema
+Modelo arquitectónico
+El sistema adopta una arquitectura distribuida en capas con tres niveles bien diferenciados, cada uno alojado en una máquina virtual distinta. Esta organización sigue el estilo cliente/servidor multicapa, donde cada nodo tiene un rol específico y se comunica con los demás a través de la red mediante ZeroMQ.
+El primer nivel (PC1) corresponde a la capa de adquisición de datos. Los sensores actúan como productores de información y el broker ZMQ como intermediario de mensajería. Este nivel es completamente productor: no consume datos de ningún otro nodo ni toma decisiones.
+El segundo nivel (PC2) corresponde a la capa de procesamiento y control. El servicio de analítica consume los eventos del broker, aplica las reglas de tráfico, toma decisiones y delega la ejecución al servicio de control de semáforos. Este nivel también mantiene la réplica de la base de datos.
+El tercer nivel (PC3) corresponde a la capa de persistencia e interacción con el operador. La base de datos principal almacena el historial completo del sistema, y el servicio de monitoreo permite al operador consultar el estado y emitir indicaciones directas.
+El estilo de comunicación entre niveles combina patrones asíncronos (PUB/SUB y PUSH/PULL) para el flujo de datos en tiempo real, y patrones síncronos (REQ/REP) para las interacciones que requieren confirmación explícita, como las consultas del operador y las indicaciones directas al módulo de analítica.
+Modelo de interacción
+El modelo de interacción describe cómo los procesos del sistema se coordinan en el tiempo y qué garantías ofrece cada canal de comunicación.
+Comunicación asíncrona PUB/SUB: Los sensores publican eventos sin esperar confirmación. El broker los reenvía al servicio de analítica con la misma modalidad. Este canal tolera que el consumidor esté temporalmente ocupado, ya que ZMQ gestiona internamente los buffers de mensajes. La latencia esperada en red local (LAN virtual) es inferior a 5 ms por mensaje. El intervalo de generación de eventos por sensor es de 5 segundos, lo que produce una tasa máxima de 60 mensajes por minuto para el conjunto de 20 intersecciones con los tres tipos de sensor.
+Comunicación asíncrona  PUSH/PULL: La analítica usa este patrón para enviar eventos a la BD principal (PC3) y a la réplica (PC2), así como para enviar comandos al servicio de semáforos. PUSH/PULL garantiza entrega ordenada y balanceo de carga si se escalan los consumidores, lo que resulta relevante para las pruebas de desempeño con múltiples sensores.
+Comunicación síncrona  REQ/REP: El servicio de monitoreo usa REQ/REP para consultas a la BD y para enviar indicaciones directas a la analítica. Este patrón bloquea al cliente hasta recibir respuesta, lo que es adecuado dado que estas interacciones son iniciadas por un operador humano y no forman parte del flujo de datos en tiempo real. El tiempo de respuesta esperado para una consulta histórica es inferior a 500 ms en condiciones normales.
+Sincronización del sistema: no existe un reloj global compartido. Cada evento incluye un timestamp en formato ISO 8601 UTC generado por el proceso que lo produce. Las consultas históricas se basan en estos timestamps almacenados en la BD, por lo que es importante que los relojes de las tres VMs estén sincronizados mediante NTP antes de ejecutar el sistema.
+Modelo de fallos
+El sistema reconoce los siguientes tipos de fallo y define un mecanismo de enmascaramiento para el caso más crítico.
+Tipos de fallo identificados:
+Fallo por omisión: un proceso deja de enviar mensajes sin notificarlo. Es el tipo de fallo más probable en este sistema, por ejemplo cuando PC3 se apaga inesperadamente. El servicio de analítica lo detecta mediante el health check: si no recibe respuesta PONG en 6 segundos, asume que PC3 está caído y deja de intentar escribir en la BD principal.
+Fallo por crash: un proceso termina abruptamente. Los sockets ZMQ del lado del consumidor detectan la desconexión y el patrón PUSH/PULL retiene los mensajes en el buffer hasta que el receptor se reconecta o el sistema decide redirigir el flujo.
+Fallo de rendimiento: un proceso responde con latencia elevada. En REQ/REP esto puede bloquear al cliente indefinidamente. Se mitiga con el timeout de 2 segundos configurado en el socket PUSH hacia la BD principal y con el timeout de 6 segundos del health check.
+Mecanismo de tolerancia a fallos — falla de PC3:
+Este es el único escenario de falla que el sistema enmascara de forma completamente transparente. El mecanismo opera así:
+El servicio de analítica ejecuta un hilo de health check independiente que envía un mensaje PING al puerto 5562 de PC3 cada 3 segundos.
+Si no recibe PONG dentro de 6 segundos, marca internamente pc3_disponible = False.
+A partir de ese momento, todos los eventos se escriben únicamente en la BD réplica de PC2.
+El servicio de monitoreo, al detectar que PC3 no responde, redirige sus consultas a la BD réplica.
+Cuando PC3 se recupera, el health check detecta la reconexión y el sistema retoma la escritura en la BD principal en el siguiente ciclo.
+La operación es transparente para el operador: el sistema continúa funcionando sin interrupción y sin intervención manual. La única consecuencia observable es que los eventos generados durante la falla quedan únicamente en la réplica; la sincronización hacia la BD principal tras la recuperación queda fuera del alcance de esta entrega.
+Modelo de seguridad
+En el contexto de esta entrega, el sistema opera en una red local controlada (LAN entre VMs) y no está expuesto a redes externas. No obstante, se identifican las siguientes entidades, canales y amenazas relevantes para un despliegue real.
+Entidades del sistema:
+Procesos productores: sensores y broker (PC1)
+Procesos de procesamiento: analítica y semáforos (PC2)
+Procesos de persistencia y control: BD y monitoreo (PC3)
+Operador humano que interactúa a través del servicio de monitoreo
+Amenazas identificadas:
+Amenaza
+Canal afectado
+Mitigación aplicada
+Suplantación de sensor
+PUB/SUB PC1→PC2
+Validación de tópico y estructura JSON en analítica
+Inyección de comandos falsos
+REQ/REP monitoreo→analítica
+Validación de campos obligatorios en cada solicitud
+Acceso no autorizado a la BD
+PULL PC2/PC3
+Los puertos solo escuchan conexiones de IPs conocidas (configuración de red VM)
+Interceptación de mensajes
+Todos los canales ZMQ
+En esta entrega los canales no están cifrados; para producción se usaría ZMQ con CurveZMQ
+Consideración sobre integridad: todos los mensajes se serializan en JSON con campos obligatorios validados al momento de la recepción. Un mensaje malformado es descartado con registro en el log del sistema. No se implementa autenticación de mensajes en esta entrega.
+Modelo de McCuber
+El modelo de McCuber describe un sistema distribuido a partir de tres dimensiones: los nodos que lo componen, la forma en que se comunican y los servicios que proveen. A continuación se aplica al sistema de gestión de tráfico.
+Nodos: el sistema cuenta con tres tipos de nodo según su rol. Los nodos productores (sensores en PC1) solo generan y publican datos. Los nodos de procesamiento (analítica y semáforos en PC2) consumen, transforman y actúan sobre los datos. Los nodos de persistencia e interfaz (BD y monitoreo en PC3) almacenan el estado del sistema y exponen una interfaz de consulta y control al operador.
+Comunicación: el sistema usa comunicación tanto síncrona como asíncrona. La comunicación asíncrona domina el flujo de datos en tiempo real (sensores → broker → analítica → BD) usando PUB/SUB y PUSH/PULL. La comunicación síncrona se reserva para interacciones que requieren confirmación (operador → monitoreo → analítica) usando REQ/REP. El middleware de comunicación es ZeroMQ, que abstrae el transporte y los patrones de mensajería.
+Servicios: los servicios principales del sistema son cuatro: el servicio de ingesta de datos (broker), el servicio de analítica y control (analítica + semáforos), el servicio de persistencia (BD principal y réplica) y el servicio de monitoreo y consulta. Cada servicio es independiente, puede desplegarse en una máquina distinta y falla de forma aislada sin comprometer necesariamente a los demás, salvo en el caso de la BD principal, cuya falla está enmascarada por la réplica.
+Diseño del sistema
+Esta sección presenta los artefactos de diseño que documentan la arquitectura completa del sistema, incluyendo la distribución física de componentes, las interfaces entre módulos, la estructura de clases y los flujos de interacción entre procesos. Todos los diagramas contemplan el sistema final a implementar, incluyendo los mecanismos de tolerancia a fallos y persistencia descritos en las secciones anteriores.
+Diagrama de despliegue
+El diagrama de despliegue muestra la distribución física de los componentes del sistema sobre las tres máquinas virtuales. Cada nodo expone los puertos ZMQ que utiliza y se indica el protocolo de comunicación empleado en cada enlace. Los sensores y el broker residen en PC1, los servicios de procesamiento y la BD réplica en PC2, y la BD principal junto al servicio de monitoreo en PC3.
+Tipo de diagrama a crear
+UML Deployment Diagram (Diagrama de Despliegue) en Visual Paradigm 17.0.
+Objetivo: mostrar en qué máquina (nodo) vive cada proceso y cómo se comunican (patrón ZMQ por enlace).
+Elementos a usar en Visual Paradigm
+Node (máquinas/VMs)
+Artifact o Execution Environment (procesos/servicios dentro de cada nodo)
+Communication Path (líneas entre componentes)
+Note (opcional, para reglas de failover y timeouts)
+Nodos (nombres exactos)
+PC1 - Adquisición
+PC2 - Procesamiento y Control
+PC3 - Persistencia y Monitoreo
+Componentes dentro de cada nodo (nombres exactos)
+PC1:
+SensorCamara
+SensorEspira
+SensorGPS
+BrokerZMQ
+PC2:
+ServicioAnalitica
+ControlSemaforos
+BDReplica
+HealthCheckProxyPersistencia
+PC3:
+BDPrincipal
+ServicioMonitoreoConsulta
+Conexiones obligatorias (etiqueta exacta del patrón)
+SensorCamara -> BrokerZMQ [PUB/SUB]
+SensorEspira -> BrokerZMQ [PUB/SUB]
+SensorGPS -> BrokerZMQ [PUB/SUB]
+BrokerZMQ -> ServicioAnalitica [PUB/SUB]
+ServicioAnalitica -> ControlSemaforos [PUSH/PULL]
+ServicioAnalitica -> BDPrincipal [PUSH/PULL]
+ServicioAnalitica -> BDReplica [PUSH/PULL]
+ServicioMonitoreoConsulta <-> BDPrincipal [REQ/REP]
+ServicioMonitoreoConsulta <-> ServicioAnalitica [REQ/REP]
+ServicioMonitoreoConsulta <-> BDReplica [REQ/REP - fallback]
+HealthCheckProxyPersistencia <-> BDPrincipal [PING/PONG]
+Lo que debe verse claramente en el diagrama final
+Flujo normal: sensores -> broker -> analítica -> (BD principal + réplica).
+Control: analítica -> semáforos.
+Operador: monitoreo consulta BD y envía órdenes a analítica.
+Tolerancia a fallos: si cae PC3/BDPrincipal, consultas y persistencia siguen por BDReplica.
+Checklist de verificación del diagrama
+[ ] Hay 3 nodos físicos (PC1, PC2, PC3).
+[ ] BrokerZMQ está en PC1.
+[ ] ServicioAnalitica y ControlSemaforos están en PC2.
+[ ] BDReplica está en PC2 y BDPrincipal en PC3.
+[ ] Existe enlace REQ/REP entre monitoreo y analítica.
+[ ] Existe mecanismo de health check y ruta de fallback.
+[ ] Cada enlace tiene su patrón (PUB/SUB, PUSH/PULL, REQ/REP).
+Diagrama de componentes
+El diagrama de componentes describe las interfaces de software entre los módulos del sistema, independientemente de su ubicación física. Se muestran los tópicos ZMQ a los que se suscribe o publica cada componente, el patrón de comunicación utilizado en cada enlace y las dependencias de configuración compartidas a través de config.json. Se incluye además el componente de health check responsable de detectar la falla de PC3 y redirigir la persistencia hacia la BD réplica.
+[Insertar diagrama de componentes aquí]
+Diagrama de clases
+El diagrama de clases presenta la jerarquía de clases del sistema. La clase abstracta SensorBase define la interfaz común para los tres tipos de sensor y es extendida por SensorCamara, SensorEspira y SensorGPS, cada una con su propia lógica de generación de eventos. Los servicios del sistema — BrokerZMQ, ServicioAnalitica, ControlSemaforos, BDReplica, BaseDatos y ServicioMonitoreo — se modelan como clases independientes con sus atributos y métodos principales.
+[Insertar diagrama de clases aquí]
+Diagrama de secuencia
+El diagrama de secuencia ilustra cuatro flujos de interacción sobre una línea de tiempo común. El primero corresponde al flujo normal de un evento de sensor desde su generación hasta su almacenamiento en la BD. El segundo muestra el flujo de detección de congestión y el comando resultante hacia el servicio de semáforos. El tercero describe una indicación manual del operador para activar la ola verde por paso de ambulancia, incluyendo la respuesta de confirmación. El cuarto muestra el comportamiento del sistema ante la falla de PC3: la detección por timeout en el health check y la redirección automática hacia la BD réplica.
+Componente de tolerancia a fallas
+El componente de tolerancia a fallos se implementa dentro del servicio de analítica mediante un hilo dedicado que ejecuta el protocolo de health check descrito en la sección 3.3. Desde el punto de vista del diseño, este componente actúa como un proxy de persistencia: toda escritura hacia la BD pasa por él, y es quien decide en cada momento si el destino es la BD principal en PC3 o la réplica en PC2. Esta decisión es transparente para el resto del sistema: ni los sensores, ni el broker, ni el servicio de semáforos conocen el estado de PC3. El único componente que adapta su comportamiento es el servicio de monitoreo, que al detectar que PC3 no responde a sus consultas REQ/REP redirige las mismas hacia la BD réplica en PC2.
+Protocolo de pruebas
+Pruebas funcionales
+Pruebas de integración
+Pruebas de fallo
+Pruebas de desempeño
+Obtención de métricas de rendimiento
+En
+Implementación inicial — resultados
+PC1: sensores y broker en ejecución, evidencia de mensajes publicados
+PC2: servicio de analítica recibiendo eventos, semáforos respondiendo
+Actualización a la BD principal del PC3 funcionando
+Conclusiones
+Referencias
