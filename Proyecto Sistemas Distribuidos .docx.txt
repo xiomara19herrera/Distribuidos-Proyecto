@@ -197,7 +197,57 @@ Diseño del sistema
 Esta sección presenta los artefactos de diseño que documentan la arquitectura completa del sistema, incluyendo la distribución física de componentes, las interfaces entre módulos, la estructura de clases y los flujos de interacción entre procesos. Todos los diagramas contemplan el sistema final a implementar, incluyendo los mecanismos de tolerancia a fallos y persistencia descritos en las secciones anteriores.
 Diagrama de despliegue
 El diagrama de despliegue muestra la distribución física de los componentes del sistema sobre las tres máquinas virtuales. Cada nodo expone los puertos ZMQ que utiliza y se indica el protocolo de comunicación empleado en cada enlace. Los sensores y el broker residen en PC1, los servicios de procesamiento y la BD réplica en PC2, y la BD principal junto al servicio de monitoreo en PC3.
-[Insertar diagrama de despliegue aquí]
+Tipo de diagrama a crear
+UML Deployment Diagram (Diagrama de Despliegue) en Visual Paradigm 17.0.
+Objetivo: mostrar en qué máquina (nodo) vive cada proceso y cómo se comunican (patrón ZMQ por enlace).
+Elementos a usar en Visual Paradigm
+Node (máquinas/VMs)
+Artifact o Execution Environment (procesos/servicios dentro de cada nodo)
+Communication Path (líneas entre componentes)
+Note (opcional, para reglas de failover y timeouts)
+Nodos (nombres exactos)
+PC1 - Adquisición
+PC2 - Procesamiento y Control
+PC3 - Persistencia y Monitoreo
+Componentes dentro de cada nodo (nombres exactos)
+PC1:
+SensorCamara
+SensorEspira
+SensorGPS
+BrokerZMQ
+PC2:
+ServicioAnalitica
+ControlSemaforos
+BDReplica
+HealthCheckProxyPersistencia
+PC3:
+BDPrincipal
+ServicioMonitoreoConsulta
+Conexiones obligatorias (etiqueta exacta del patrón)
+SensorCamara -> BrokerZMQ [PUB/SUB]
+SensorEspira -> BrokerZMQ [PUB/SUB]
+SensorGPS -> BrokerZMQ [PUB/SUB]
+BrokerZMQ -> ServicioAnalitica [PUB/SUB]
+ServicioAnalitica -> ControlSemaforos [PUSH/PULL]
+ServicioAnalitica -> BDPrincipal [PUSH/PULL]
+ServicioAnalitica -> BDReplica [PUSH/PULL]
+ServicioMonitoreoConsulta <-> BDPrincipal [REQ/REP]
+ServicioMonitoreoConsulta <-> ServicioAnalitica [REQ/REP]
+ServicioMonitoreoConsulta <-> BDReplica [REQ/REP - fallback]
+HealthCheckProxyPersistencia <-> BDPrincipal [PING/PONG]
+Lo que debe verse claramente en el diagrama final
+Flujo normal: sensores -> broker -> analítica -> (BD principal + réplica).
+Control: analítica -> semáforos.
+Operador: monitoreo consulta BD y envía órdenes a analítica.
+Tolerancia a fallos: si cae PC3/BDPrincipal, consultas y persistencia siguen por BDReplica.
+Checklist de verificación del diagrama
+[ ] Hay 3 nodos físicos (PC1, PC2, PC3).
+[ ] BrokerZMQ está en PC1.
+[ ] ServicioAnalitica y ControlSemaforos están en PC2.
+[ ] BDReplica está en PC2 y BDPrincipal en PC3.
+[ ] Existe enlace REQ/REP entre monitoreo y analítica.
+[ ] Existe mecanismo de health check y ruta de fallback.
+[ ] Cada enlace tiene su patrón (PUB/SUB, PUSH/PULL, REQ/REP).
 Diagrama de componentes
 El diagrama de componentes describe las interfaces de software entre los módulos del sistema, independientemente de su ubicación física. Se muestran los tópicos ZMQ a los que se suscribe o publica cada componente, el patrón de comunicación utilizado en cada enlace y las dependencias de configuración compartidas a través de config.json. Se incluye además el componente de health check responsable de detectar la falla de PC3 y redirigir la persistencia hacia la BD réplica.
 [Insertar diagrama de componentes aquí]
